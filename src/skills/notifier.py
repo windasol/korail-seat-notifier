@@ -99,7 +99,15 @@ class NotifierSkill:
             except ImportError:
                 import subprocess
 
-                msg = payload.message.replace('"', '`"')[:150]
+                # 인젝션 방지: 제목·메시지에서 따옴표·개행 제거
+                safe_title = (
+                    payload.title
+                    .replace('"', "").replace("'", "").replace("\n", " ")[:80]
+                )
+                safe_msg = (
+                    payload.message
+                    .replace('"', "").replace("'", "").replace("\n", " ")[:150]
+                )
                 subprocess.Popen(  # noqa: S603
                     [
                         "powershell", "-Command",
@@ -108,7 +116,7 @@ class NotifierSkill:
                         "$n=New-Object System.Windows.Forms.NotifyIcon; "
                         "$n.Icon=[System.Drawing.SystemIcons]::Information; "
                         "$n.Visible=$true; "
-                        f'$n.ShowBalloonTip(5000,"{payload.title}","{msg}",'
+                        f'$n.ShowBalloonTip(5000,"{safe_title}","{safe_msg}",'
                         "[System.Windows.Forms.ToolTipIcon]::Info)",
                     ],
                     creationflags=0x08000000,

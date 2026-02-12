@@ -7,12 +7,15 @@ tkinter 기반 GUI. OrchestratorAgent를 백그라운드 스레드(asyncio)에�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue
 import threading
 import tkinter as tk
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
+from datetime import time as dtime
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Optional
 
@@ -43,6 +46,10 @@ FONT_LABEL  = ("Malgun Gothic", 10)
 FONT_BOLD   = ("Malgun Gothic", 10, "bold")
 FONT_LOG    = ("Consolas", 9)
 FONT_STATUS = ("Malgun Gothic", 11, "bold")
+FONT_SMALL  = ("Malgun Gothic", 9)
+
+# 설정 파일 경로 (프로젝트 루트)
+_SETTINGS_PATH = Path(__file__).parent.parent / "settings.json"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -83,12 +90,7 @@ class AsyncRunner:
         self._loop.run_forever()
 
     def submit(self, coro) -> asyncio.Future:  # type: ignore[type-arg]
-        """코루틴을 비동기 루프에 제출하고 Future 반환"""
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
-
-    def call_soon(self, callback) -> None:  # type: ignore[type-arg]
-        """루프 스레드에서 콜백 실행"""
-        self._loop.call_soon_threadsafe(callback)
 
     def stop(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
@@ -101,24 +103,28 @@ class AsyncRunner:
 class KorailGUI:
     """코레일 좌석 알림 GUI"""
 
-    POLL_INTERVAL_MS = 100  # GUI 업데이트 주기 (ms)
+    POLL_INTERVAL_MS = 100    # GUI 큐 폴링 주기 (ms)
+    TICK_INTERVAL_MS = 1000   # 카운트다운 갱신 주기 (ms)
 
     def __init__(self, root: tk.Tk) -> None:
         self._root = root
         self._gui_queue: queue.Queue = queue.Queue()  # type: ignore[type-arg]
         self._async_runner = AsyncRunner()
         self._orchestrator: Optional[OrchestratorAgent] = None
-        self._monitor_future: Optional[asyncio.Future] = None  # type: ignore[type-arg]
+        self._monitor_future = None
         self._is_monitoring = False
+        self._next_check_ts: float = 0.0
+        self._request_count = 0
 
         self._setup_logging()
         self._build_ui()
+        self._load_settings()
         self._start_queue_poll()
+        self._tick()
 
     # ── 로깅 설정 ─────────────────────────────────────────────────
 
     def _setup_logging(self) -> None:
-        """korail.* 로거를 GUI 큐 핸들러로 연결"""
         handler = QueueLogHandler(self._gui_queue)
         handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
         root_logger = logging.getLogger("korail")
@@ -129,43 +135,33 @@ class KorailGUI:
     # ── UI 구성 ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self._root.title("코레일 좌석 빈자리 알림 v2.0")
+        self._root.title("코레일 좌석 빈자리 알림 v2.1")
         self._root.configure(bg=CLR_BG)
-        self._root.resizable(False, False)
+        self._root.minsize(680, 600)
 
-        # 중앙 정렬
-        w, h = 660, 750
+        w, h = 680, 800
         sw = self._root.winfo_screenwidth()
         sh = self._root.winfo_screenheight()
         self._root.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
-        # 스타일
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("TCombobox", padding=5, font=FONT_LABEL)
-        style.configure("TSpinbox", padding=5, font=FONT_LABEL)
-        style.configure("TEntry", padding=5, font=FONT_LABEL)
+        style.configure("TCombobox",    padding=5, font=FONT_LABEL)
+        style.configure("TSpinbox",     padding=5, font=FONT_LABEL)
+        style.configure("TEntry",       padding=5, font=FONT_LABEL)
         style.configure("TCheckbutton", background=CLR_PANEL,
                         font=FONT_LABEL, foreground=CLR_TEXT)
 
         main = tk.Frame(self._root, bg=CLR_BG, padx=16, pady=12)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # 타이틀
         self._build_title(main)
-        # 구간 입력
         self._build_route_section(main)
-        # 날짜/열차 입력
         self._build_detail_section(main)
-        # 시간 범위
         self._build_time_section(main)
-        # 알림 설정
         self._build_notify_section(main)
-        # 버튼
         self._build_buttons(main)
-        # 상태 표시
         self._build_status(main)
-        # 로그
         self._build_log(main)
 
     # ── 타이틀 ────────────────────────────────────────────────────
@@ -174,59 +170,48 @@ class KorailGUI:
         frame = tk.Frame(parent, bg=CLR_ACCENT, pady=10)
         frame.pack(fill=tk.X, pady=(0, 12))
         tk.Label(
-            frame,
-            text="🚄  코레일 좌석 빈자리 알림",
-            font=FONT_TITLE,
-            bg=CLR_ACCENT, fg="white",
+            frame, text="코레일 좌석 빈자리 알림",
+            font=FONT_TITLE, bg=CLR_ACCENT, fg="white",
         ).pack()
 
     # ── 구간 선택 ─────────────────────────────────────────────────
 
     def _build_route_section(self, parent: tk.Frame) -> None:
-        panel = self._panel(parent, "🗺  출발 · 도착역")
-
+        panel = self._panel(parent, "출발 / 도착역")
         frame = tk.Frame(panel, bg=CLR_PANEL)
         frame.pack(fill=tk.X, padx=12, pady=(0, 10))
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(4, weight=1)
 
-        # 출발역
         tk.Label(frame, text="출발역", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=0, padx=(0, 6), sticky="w")
         self._dep_var = tk.StringVar(value="서울")
-        dep_cb = ttk.Combobox(frame, textvariable=self._dep_var,
-                               values=STATIONS, state="readonly", width=14)
-        dep_cb.grid(row=0, column=1, sticky="ew")
+        ttk.Combobox(frame, textvariable=self._dep_var,
+                     values=STATIONS, state="readonly", width=14).grid(row=0, column=1, sticky="ew")
 
-        # 화살표
-        tk.Label(frame, text="→", font=("Malgun Gothic", 14, "bold"),
-                 bg=CLR_PANEL, fg=CLR_ACCENT).grid(row=0, column=2, padx=12)
+        tk.Label(frame, text="  →  ", font=("Malgun Gothic", 14, "bold"),
+                 bg=CLR_PANEL, fg=CLR_ACCENT).grid(row=0, column=2)
 
-        # 도착역
         tk.Label(frame, text="도착역", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=3, padx=(0, 6), sticky="w")
         self._arr_var = tk.StringVar(value="부산")
-        arr_cb = ttk.Combobox(frame, textvariable=self._arr_var,
-                               values=STATIONS, state="readonly", width=14)
-        arr_cb.grid(row=0, column=4, sticky="ew")
+        ttk.Combobox(frame, textvariable=self._arr_var,
+                     values=STATIONS, state="readonly", width=14).grid(row=0, column=4, sticky="ew")
 
     # ── 날짜/열차/좌석/인원 ───────────────────────────────────────
 
     def _build_detail_section(self, parent: tk.Frame) -> None:
-        panel = self._panel(parent, "📋  상세 조건")
-
+        panel = self._panel(parent, "상세 조건")
         frame = tk.Frame(panel, bg=CLR_PANEL)
         frame.pack(fill=tk.X, padx=12, pady=(0, 10))
 
-        # 날짜
         tk.Label(frame, text="출발 날짜", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=0, sticky="w", padx=(0, 6))
         tomorrow = date.today() + timedelta(days=1)
         self._date_var = tk.StringVar(value=tomorrow.strftime("%Y-%m-%d"))
-        date_entry = ttk.Entry(frame, textvariable=self._date_var, width=13)
-        date_entry.grid(row=0, column=1, padx=(0, 16), sticky="ew")
+        ttk.Entry(frame, textvariable=self._date_var, width=13).grid(
+            row=0, column=1, padx=(0, 16), sticky="ew")
 
-        # 열차 종류
         tk.Label(frame, text="열차", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=2, sticky="w", padx=(0, 6))
         self._train_var = tk.StringVar(value="KTX")
@@ -234,7 +219,6 @@ class KorailGUI:
                      values=TRAIN_TYPES, state="readonly", width=11).grid(
             row=0, column=3, padx=(0, 16), sticky="ew")
 
-        # 좌석 유형
         tk.Label(frame, text="좌석", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=4, sticky="w", padx=(0, 6))
         self._seat_var = tk.StringVar(value="일반실")
@@ -242,30 +226,29 @@ class KorailGUI:
                      values=SEAT_TYPES, state="readonly", width=8).grid(
             row=0, column=5, padx=(0, 16), sticky="ew")
 
-        # 승객 수
         tk.Label(frame, text="승객", font=FONT_BOLD,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=6, sticky="w", padx=(0, 6))
         self._pax_var = tk.StringVar(value="1")
-        ttk.Spinbox(frame, textvariable=self._pax_var,
-                    from_=1, to=9, width=4).grid(row=0, column=7, sticky="ew")
+        ttk.Spinbox(frame, textvariable=self._pax_var, from_=1, to=9, width=4).grid(
+            row=0, column=7, sticky="ew")
 
     # ── 시간 범위 ─────────────────────────────────────────────────
 
     def _build_time_section(self, parent: tk.Frame) -> None:
-        panel = self._panel(parent, "⏰  희망 탑승 시간대")
-
+        panel = self._panel(parent, "희망 탑승 시간대")
         frame = tk.Frame(panel, bg=CLR_PANEL)
         frame.pack(fill=tk.X, padx=12, pady=(0, 10))
 
-        def time_spinboxes(label: str, col: int, h_var: tk.StringVar, m_var: tk.StringVar) -> None:
+        def time_spinboxes(label: str, col: int,
+                           h_var: tk.StringVar, m_var: tk.StringVar) -> None:
             tk.Label(frame, text=label, font=FONT_BOLD,
                      bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=col, sticky="w", padx=(0, 6))
             ttk.Spinbox(frame, textvariable=h_var, from_=0, to=23,
-                        width=4, format="%02.0f").grid(row=0, column=col+1)
+                        width=4, format="%02.0f").grid(row=0, column=col + 1)
             tk.Label(frame, text=":", font=FONT_BOLD, bg=CLR_PANEL,
-                     fg=CLR_TEXT).grid(row=0, column=col+2)
+                     fg=CLR_TEXT).grid(row=0, column=col + 2)
             ttk.Spinbox(frame, textvariable=m_var, from_=0, to=59,
-                        width=4, format="%02.0f").grid(row=0, column=col+3)
+                        width=4, format="%02.0f").grid(row=0, column=col + 3)
 
         self._start_h = tk.StringVar(value="08")
         self._start_m = tk.StringVar(value="00")
@@ -280,28 +263,43 @@ class KorailGUI:
     # ── 알림 설정 ─────────────────────────────────────────────────
 
     def _build_notify_section(self, parent: tk.Frame) -> None:
-        panel = self._panel(parent, "🔔  알림 설정")
+        panel = self._panel(parent, "알림 설정")
 
-        frame = tk.Frame(panel, bg=CLR_PANEL)
-        frame.pack(fill=tk.X, padx=12, pady=(0, 10))
+        row1 = tk.Frame(panel, bg=CLR_PANEL)
+        row1.pack(fill=tk.X, padx=12, pady=(0, 4))
 
         self._notify_desktop = tk.BooleanVar(value=True)
         self._notify_sound   = tk.BooleanVar(value=True)
         self._notify_webhook = tk.BooleanVar(value=False)
 
-        ttk.Checkbutton(frame, text="데스크톱 알림",
+        ttk.Checkbutton(row1, text="데스크톱 알림",
                         variable=self._notify_desktop).grid(row=0, column=0, padx=(0, 16))
-        ttk.Checkbutton(frame, text="소리 알림",
+        ttk.Checkbutton(row1, text="소리 알림",
                         variable=self._notify_sound).grid(row=0, column=1, padx=(0, 16))
-        ttk.Checkbutton(frame, text="Webhook",
-                        variable=self._notify_webhook).grid(row=0, column=2, padx=(0, 16))
+        ttk.Checkbutton(row1, text="Webhook",
+                        variable=self._notify_webhook,
+                        command=self._toggle_webhook).grid(row=0, column=2, padx=(0, 16))
 
-        # 조회 간격
-        tk.Label(frame, text="조회 간격 (초):", font=FONT_LABEL,
+        tk.Label(row1, text="조회 간격(초):", font=FONT_LABEL,
                  bg=CLR_PANEL, fg=CLR_TEXT).grid(row=0, column=3, padx=(24, 6))
         self._interval_var = tk.StringVar(value="30")
-        ttk.Spinbox(frame, textvariable=self._interval_var,
+        ttk.Spinbox(row1, textvariable=self._interval_var,
                     from_=30, to=300, increment=10, width=5).grid(row=0, column=4)
+
+        # Webhook URL 행 (기본 숨김)
+        self._webhook_frame = tk.Frame(panel, bg=CLR_PANEL)
+        tk.Label(self._webhook_frame, text="Webhook URL:", font=FONT_LABEL,
+                 bg=CLR_PANEL, fg=CLR_TEXT).pack(side=tk.LEFT, padx=(0, 6))
+        self._webhook_url_var = tk.StringVar()
+        ttk.Entry(self._webhook_frame, textvariable=self._webhook_url_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
+        self._webhook_frame.pack_forget()
+
+    def _toggle_webhook(self) -> None:
+        if self._notify_webhook.get():
+            self._webhook_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+        else:
+            self._webhook_frame.pack_forget()
 
     # ── 버튼 ──────────────────────────────────────────────────────
 
@@ -309,68 +307,60 @@ class KorailGUI:
         frame = tk.Frame(parent, bg=CLR_BG, pady=8)
         frame.pack(fill=tk.X)
 
-        # 시작 버튼
         self._btn_start = tk.Button(
-            frame,
-            text="▶  모니터링 시작",
-            font=FONT_BOLD,
+            frame, text="▶  모니터링 시작", font=FONT_BOLD,
             bg=CLR_ACCENT, fg="white",
             activebackground=CLR_ACCENT_HV, activeforeground="white",
-            relief=tk.FLAT, padx=24, pady=10,
-            cursor="hand2",
+            relief=tk.FLAT, padx=24, pady=10, cursor="hand2",
             command=self._on_start,
         )
         self._btn_start.pack(side=tk.LEFT, padx=(0, 10))
 
-        # 중지 버튼
         self._btn_stop = tk.Button(
-            frame,
-            text="■  중지",
-            font=FONT_BOLD,
+            frame, text="■  중지", font=FONT_BOLD,
             bg=CLR_ERROR, fg="white",
             activebackground="#A93226", activeforeground="white",
-            relief=tk.FLAT, padx=24, pady=10,
-            cursor="hand2",
-            state=tk.DISABLED,
-            command=self._on_stop,
+            relief=tk.FLAT, padx=24, pady=10, cursor="hand2",
+            state=tk.DISABLED, command=self._on_stop,
         )
         self._btn_stop.pack(side=tk.LEFT, padx=(0, 10))
 
-        # 로그 지우기
         tk.Button(
-            frame,
-            text="🗑  로그 지우기",
-            font=FONT_LABEL,
+            frame, text="로그 지우기", font=FONT_LABEL,
             bg=CLR_BORDER, fg=CLR_TEXT,
             activebackground=CLR_MUTED, activeforeground="white",
-            relief=tk.FLAT, padx=12, pady=10,
-            cursor="hand2",
+            relief=tk.FLAT, padx=12, pady=10, cursor="hand2",
             command=self._clear_log,
         ).pack(side=tk.RIGHT)
 
     # ── 상태 표시 ─────────────────────────────────────────────────
 
     def _build_status(self, parent: tk.Frame) -> None:
-        frame = tk.Frame(parent, bg=CLR_PANEL,
-                         relief=tk.FLAT, bd=1, pady=8)
-        frame.pack(fill=tk.X, pady=(0, 8))
+        frame = tk.Frame(parent, bg=CLR_PANEL, relief=tk.FLAT, pady=6)
+        frame.pack(fill=tk.X, pady=(0, 6))
         frame.configure(highlightbackground=CLR_BORDER, highlightthickness=1)
 
-        inner = tk.Frame(frame, bg=CLR_PANEL)
-        inner.pack(padx=12)
+        left = tk.Frame(frame, bg=CLR_PANEL)
+        left.pack(side=tk.LEFT, padx=12)
 
-        self._status_dot = tk.Label(inner, text="●", font=("Arial", 14),
+        self._status_dot = tk.Label(left, text="●", font=("Arial", 14),
                                      bg=CLR_PANEL, fg=CLR_MUTED)
         self._status_dot.pack(side=tk.LEFT, padx=(0, 8))
 
-        self._status_label = tk.Label(inner, text="대기 중",
+        self._status_label = tk.Label(left, text="대기 중",
                                        font=FONT_STATUS, bg=CLR_PANEL, fg=CLR_MUTED)
         self._status_label.pack(side=tk.LEFT)
 
-        # 요청 카운터
-        self._counter_label = tk.Label(frame, text="", font=FONT_LABEL,
+        right = tk.Frame(frame, bg=CLR_PANEL)
+        right.pack(side=tk.RIGHT, padx=12)
+
+        self._counter_label = tk.Label(right, text="", font=FONT_SMALL,
                                         bg=CLR_PANEL, fg=CLR_MUTED)
-        self._counter_label.pack(side=tk.RIGHT, padx=12)
+        self._counter_label.pack(side=tk.LEFT, padx=(0, 16))
+
+        self._countdown_label = tk.Label(right, text="", font=FONT_SMALL,
+                                          bg=CLR_PANEL, fg=CLR_MUTED)
+        self._countdown_label.pack(side=tk.LEFT)
 
     # ── 로그 영역 ─────────────────────────────────────────────────
 
@@ -378,22 +368,18 @@ class KorailGUI:
         frame = tk.Frame(parent, bg=CLR_BG)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(frame, text="📋  실시간 로그",
+        tk.Label(frame, text="실시간 로그",
                  font=FONT_BOLD, bg=CLR_BG, fg=CLR_TEXT).pack(anchor="w")
 
         self._log_text = scrolledtext.ScrolledText(
-            frame,
-            font=FONT_LOG,
+            frame, font=FONT_LOG,
             bg=CLR_LOG_BG, fg=CLR_LOG_FG,
             insertbackground="white",
-            relief=tk.FLAT,
-            wrap=tk.WORD,
-            height=14,
+            relief=tk.FLAT, wrap=tk.WORD, height=14,
             state=tk.DISABLED,
         )
         self._log_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
-        # 로그 레벨별 색상 태그
         self._log_text.tag_configure("INFO",    foreground="#93C5FD")
         self._log_text.tag_configure("WARNING", foreground="#FCD34D")
         self._log_text.tag_configure("ERROR",   foreground="#F87171")
@@ -404,7 +390,6 @@ class KorailGUI:
     # ── 유틸 ──────────────────────────────────────────────────────
 
     def _panel(self, parent: tk.Frame, title: str) -> tk.Frame:
-        """테두리 있는 섹션 패널 생성"""
         outer = tk.Frame(parent, bg=CLR_BG, pady=4)
         outer.pack(fill=tk.X)
         tk.Label(outer, text=title, font=FONT_BOLD,
@@ -415,7 +400,6 @@ class KorailGUI:
         return inner
 
     def _log(self, msg: str, tag: str = "INFO") -> None:
-        """GUI 로그 텍스트에 한 줄 추가 (메인 스레드에서 호출)"""
         self._log_text.configure(state=tk.NORMAL)
         self._log_text.insert(tk.END, msg + "\n", tag)
         self._log_text.configure(state=tk.DISABLED)
@@ -430,13 +414,29 @@ class KorailGUI:
         self._status_dot.configure(fg=color)
         self._status_label.configure(text=text, fg=color)
 
+    # ── 카운트다운 틱 ─────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        """1초마다 다음 조회까지 카운트다운 표시"""
+        if self._is_monitoring and self._next_check_ts > 0:
+            import time as _t
+            remaining = self._next_check_ts - _t.monotonic()
+            if remaining > 0:
+                self._countdown_label.configure(
+                    text=f"다음 조회: {int(remaining)}초 후", fg=CLR_MUTED)
+            else:
+                self._countdown_label.configure(text="조회 중...", fg=CLR_ACCENT)
+        elif not self._is_monitoring:
+            self._countdown_label.configure(text="")
+
+        self._root.after(self.TICK_INTERVAL_MS, self._tick)
+
     # ── 큐 폴링 (GUI 업데이트) ────────────────────────────────────
 
     def _start_queue_poll(self) -> None:
         self._poll_queue()
 
     def _poll_queue(self) -> None:
-        """비동기 스레드로부터 메시지를 읽어 GUI 업데이트"""
         try:
             while True:
                 item = self._gui_queue.get_nowait()
@@ -459,14 +459,18 @@ class KorailGUI:
                     self._set_status(text, color)
 
                 elif kind == "counter":
-                    _, text = item
-                    self._counter_label.configure(text=text)
+                    _, count, next_ts = item
+                    self._request_count = count
+                    self._next_check_ts = next_ts
+                    self._counter_label.configure(
+                        text=f"조회 {count}회" if count else "")
 
                 elif kind == "done":
                     self._on_monitoring_done()
 
                 elif kind == "seat_found":
-                    self._on_seat_found()
+                    _, trains_text = item
+                    self._on_seat_found(trains_text)
 
         except queue.Empty:
             pass
@@ -476,7 +480,6 @@ class KorailGUI:
     # ── 이벤트 핸들러 ─────────────────────────────────────────────
 
     def _on_start(self) -> None:
-        """모니터링 시작"""
         try:
             query = self._build_query()
             config = self._build_config()
@@ -484,15 +487,17 @@ class KorailGUI:
             messagebox.showerror("입력 오류", str(e))
             return
 
+        self._save_settings()
         self._is_monitoring = True
+        self._request_count = 0
+        self._next_check_ts = 0.0
         self._btn_start.configure(state=tk.DISABLED)
         self._btn_stop.configure(state=tk.NORMAL)
         self._set_status("모니터링 중...", CLR_ACCENT)
-        self._gui_queue.put(("counter", ""))
 
         summary = (
             f"\n{'─'*52}\n"
-            f"  🚄 모니터링 시작\n"
+            f"  모니터링 시작\n"
             f"  구간: {query.departure_station} → {query.arrival_station}\n"
             f"  날짜: {query.departure_date}  "
             f"시간: {query.preferred_time_start:%H:%M}~{query.preferred_time_end:%H:%M}\n"
@@ -509,36 +514,39 @@ class KorailGUI:
         )
 
     def _on_stop(self) -> None:
-        """모니터링 중지"""
         if self._orchestrator:
             self._orchestrator.stop()
-            self._log("\n  ■ 중지 요청 전송됨...", "WARNING")
+            self._log("\n  중지 요청 전송됨...", "WARNING")
 
     def _on_monitoring_done(self) -> None:
-        """모니터링 종료 후 UI 복원"""
         self._is_monitoring = False
+        self._next_check_ts = 0.0
         self._btn_start.configure(state=tk.NORMAL)
         self._btn_stop.configure(state=tk.DISABLED)
         self._set_status("모니터링 종료", CLR_MUTED)
         self._counter_label.configure(text="")
+        self._countdown_label.configure(text="")
 
-    def _on_seat_found(self) -> None:
-        """좌석 감지 시 상태 깜빡임 효과"""
-        self._set_status("🎉 빈자리 발견!", CLR_SUCCESS)
+    def _on_seat_found(self, trains_text: str) -> None:
+        self._set_status("빈자리 발견!", CLR_SUCCESS)
         self._root.bell()
-        # 3초 후 복원
-        self._root.after(3000, lambda: self._set_status("모니터링 중...", CLR_ACCENT))
+        if trains_text:
+            self._log(f"\n{'━'*52}", "DETECT")
+            self._log(f"  빈자리 발견!\n{trains_text}", "DETECT")
+            self._log(f"{'━'*52}\n", "DETECT")
+        self._root.after(5000, lambda: (
+            self._set_status("모니터링 중...", CLR_ACCENT)
+            if self._is_monitoring else None
+        ))
 
     # ── 쿼리/설정 빌더 ────────────────────────────────────────────
 
     def _build_query(self) -> TrainQuery:
         dep = validate_station(self._dep_var.get())
         arr = validate_station(self._arr_var.get())
-
         if dep == arr:
             raise ValueError("출발역과 도착역이 같습니다.")
 
-        # 날짜 파싱
         date_str = self._date_var.get().strip().replace("-", "")
         if len(date_str) != 8:
             raise ValueError("날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)")
@@ -546,7 +554,6 @@ class KorailGUI:
         if dep_date < date.today():
             raise ValueError("과거 날짜는 선택할 수 없습니다.")
 
-        from datetime import time as dtime
         t_start = dtime(int(self._start_h.get()), int(self._start_m.get()))
         t_end   = dtime(int(self._end_h.get()), int(self._end_m.get()))
         if t_end <= t_start:
@@ -577,33 +584,100 @@ class KorailGUI:
             methods.append("webhook")
 
         interval = max(float(self._interval_var.get()), 30.0)
+        webhook_url = (
+            self._webhook_url_var.get().strip()
+            or os.environ.get("KORAIL_WEBHOOK_URL", "")
+        )
 
         return AgentConfig(
             base_interval=interval,
             notification_methods=methods,
-            webhook_url=os.environ.get("KORAIL_WEBHOOK_URL", ""),
+            webhook_url=webhook_url,
         )
+
+    # ── 설정 저장/불러오기 ────────────────────────────────────────
+
+    def _save_settings(self) -> None:
+        try:
+            settings = {
+                "dep":         self._dep_var.get(),
+                "arr":         self._arr_var.get(),
+                "date":        self._date_var.get(),
+                "train":       self._train_var.get(),
+                "seat":        self._seat_var.get(),
+                "pax":         self._pax_var.get(),
+                "start_h":     self._start_h.get(),
+                "start_m":     self._start_m.get(),
+                "end_h":       self._end_h.get(),
+                "end_m":       self._end_m.get(),
+                "interval":    self._interval_var.get(),
+                "desktop":     self._notify_desktop.get(),
+                "sound":       self._notify_sound.get(),
+                "webhook":     self._notify_webhook.get(),
+                "webhook_url": self._webhook_url_var.get(),
+            }
+            _SETTINGS_PATH.write_text(
+                json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _load_settings(self) -> None:
+        try:
+            if not _SETTINGS_PATH.exists():
+                return
+            settings = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+            self._dep_var.set(settings.get("dep", "서울"))
+            self._arr_var.set(settings.get("arr", "부산"))
+            self._date_var.set(settings.get("date", ""))
+            self._train_var.set(settings.get("train", "KTX"))
+            self._seat_var.set(settings.get("seat", "일반실"))
+            self._pax_var.set(settings.get("pax", "1"))
+            self._start_h.set(settings.get("start_h", "08"))
+            self._start_m.set(settings.get("start_m", "00"))
+            self._end_h.set(settings.get("end_h", "12"))
+            self._end_m.set(settings.get("end_m", "00"))
+            self._interval_var.set(settings.get("interval", "30"))
+            self._notify_desktop.set(settings.get("desktop", True))
+            self._notify_sound.set(settings.get("sound", True))
+            self._notify_webhook.set(settings.get("webhook", False))
+            self._webhook_url_var.set(settings.get("webhook_url", ""))
+            if settings.get("webhook"):
+                self._toggle_webhook()
+        except Exception:
+            pass
 
     # ── 비동기 모니터링 루프 ──────────────────────────────────────
 
-    async def _run_monitoring(
-        self, query: TrainQuery, config: AgentConfig
-    ) -> None:
-        """OrchestratorAgent 실행 (비동기 스레드에서 호출)"""
+    async def _run_monitoring(self, query: TrainQuery, config: AgentConfig) -> None:
+        import time as _t
         assert self._orchestrator is not None
 
-        # 이벤트 버스 모니터링 (좌석 감지 감시)
         original_dispatch = self._orchestrator._dispatch
 
         async def patched_dispatch(msg):  # type: ignore[return]
             from src.models.events import AgentEvent
             if msg.event == AgentEvent.SEAT_DETECTED:
-                self._gui_queue.put_nowait(("seat_found",))
-            if msg.event == AgentEvent.POLL_RESULT:
+                result = msg.payload
+                lines: list[str] = []
+                for t in getattr(result, "available_trains", [])[:8]:
+                    gen = f"일반 {t.general_seats}석" if t.general_seats else ""
+                    spe = f"특실 {t.special_seats}석" if t.special_seats else ""
+                    seat_str = " / ".join(filter(None, [gen, spe]))
+                    lines.append(
+                        f"  {t.train_type} {t.train_no}호  "
+                        f"{t.departure_time:%H:%M}→{t.arrival_time:%H:%M}  "
+                        f"({seat_str})"
+                    )
+                self._gui_queue.put_nowait(("seat_found", "\n".join(lines)))
+
+            elif msg.event == AgentEvent.POLL_RESULT:
                 payload = msg.payload
                 if isinstance(payload, dict):
                     count = payload.get("request_count", 0)
-                    self._gui_queue.put_nowait(("counter", f"조회 {count}회"))
+                    next_ts = _t.monotonic() + config.base_interval
+                    self._gui_queue.put_nowait(("counter", count, next_ts))
+
             await original_dispatch(msg)
 
         self._orchestrator._dispatch = patched_dispatch  # type: ignore[method-assign]
@@ -622,7 +696,6 @@ class KorailGUI:
 # ─────────────────────────────────────────────────────────────────
 
 def launch() -> None:
-    """GUI 실행 진입점"""
     root = tk.Tk()
     try:
         root.iconbitmap(default="")
@@ -634,9 +707,9 @@ def launch() -> None:
 
 
 def _on_close(root: tk.Tk, app: KorailGUI) -> None:
-    """창 닫기 처리: 모니터링 중이면 중지 후 종료"""
     if app._is_monitoring and app._orchestrator:
         app._orchestrator.stop()
+    app._save_settings()
     app._async_runner.stop()
     root.destroy()
 

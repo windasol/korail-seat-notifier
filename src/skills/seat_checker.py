@@ -7,6 +7,7 @@ API: smart.letskorail.com (Korail 공식 모바일 앱 백엔드)
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import time
 from time import monotonic
@@ -102,7 +103,7 @@ class SeatCheckerSkill:
             cls._session = None
 
     async def check(self, query: TrainQuery) -> CheckResult:
-        """좌석 가용성 조회 실행"""
+        """좌석 가용성 조회 실행 (페이지네이션으로 전체 결과 수집)"""
         session = await self._get_session(
             self._request_timeout,
             self._connect_timeout,
@@ -110,29 +111,45 @@ class SeatCheckerSkill:
         )
         params = self._build_params(query)
         ts = monotonic()
+        total_size = 0
+        all_trains: list[TrainInfo] = []
 
-        async with session.get(self.BASE_URL, params=params) as resp:
-            resp.raise_for_status()
-            # 모바일 API는 JSON이지만 Content-Type을 text/html로 반환하므로
-            # content_type 검사 없이 파싱
-            data = await resp.json(content_type=None)
-            raw_size = resp.content_length or len(await resp.read()) if False else 0
+        # 페이지네이션: h_next_pg_flg="Y" 이면 다음 페이지 존재
+        MAX_PAGES = 5  # 무한 루프 방지
+        for _ in range(MAX_PAGES):
+            async with session.get(self.BASE_URL, params=params) as resp:
+                resp.raise_for_status()
+                raw_bytes = await resp.read()
+                data = json.loads(raw_bytes)
+                total_size += len(raw_bytes)
 
-        # API 오류 응답 처리
-        result_code = data.get("strResult", "")
-        if result_code == "FAIL":
-            msg_cd = data.get("h_msg_cd", "")
-            msg_txt = data.get("h_msg_txt", "")
-            raise RuntimeError(f"API 오류 [{msg_cd}]: {msg_txt}")
+            # API 오류 응답 처리
+            result_code = data.get("strResult", "")
+            if result_code == "FAIL":
+                msg_cd = data.get("h_msg_cd", "")
+                msg_txt = data.get("h_msg_txt", "")
+                raise RuntimeError(f"API 오류 [{msg_cd}]: {msg_txt}")
 
-        trains = self._parse_response(data, query)
-        available = any(t.has_seats for t in trains)
+            all_trains.extend(self._parse_response(data, query))
+
+            # 다음 페이지 없으면 종료
+            if data.get("h_next_pg_flg") != "Y":
+                break
+
+            # 다음 페이지 파라미터 추가
+            params = {
+                **params,
+                "h_qry_st_no_next": data.get("h_qry_st_no_next") or "",
+                "h_trn_no_next":    data.get("h_trn_no_next") or "",
+            }
+
+        available = any(t.has_seats for t in all_trains)
 
         return CheckResult(
             query_timestamp=ts,
-            trains=tuple(trains),
+            trains=tuple(all_trains),
             seats_available=available,
-            raw_response_size=raw_size,
+            raw_response_size=total_size,
         )
 
     @staticmethod
