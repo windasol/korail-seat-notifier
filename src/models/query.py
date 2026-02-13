@@ -40,6 +40,20 @@ class TrainQuery:
             f"{self.train_type} {self.seat_type} {self.passenger_count}명"
         )
 
+    def ticket_url(self) -> str:
+        """코레일 승차권 예매 페이지 URL (구간/날짜/시간 파라미터 포함)"""
+        from src.skills.station_data import get_station_code
+        dep_code = get_station_code(self.departure_station)
+        arr_code = get_station_code(self.arrival_station)
+        date_str = self.departure_date.strftime("%Y%m%d")
+        time_str = self.preferred_time_start.strftime("%H%M%S")
+        return (
+            f"https://www.korail.com/ticket/search"
+            f"?startStnCd={dep_code}&endStnCd={arr_code}"
+            f"&srtDate={date_str}&srtTime={time_str}"
+            f"&psgNum={self.passenger_count}"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class TrainInfo:

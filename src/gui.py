@@ -19,7 +19,7 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Optional
 
-from src.agents.orchestrator import OrchestratorAgent, OrchestratorState
+from src.agents.orchestrator import OrchestratorAgent
 from src.models.config import AgentConfig
 from src.models.query import TrainQuery
 from src.skills.station_data import STATION_CODES, validate_station
@@ -115,6 +115,7 @@ class KorailGUI:
         self._is_monitoring = False
         self._next_check_ts: float = 0.0
         self._request_count = 0
+        self._current_ticket_url: str = ""
 
         self._setup_logging()
         self._build_ui()
@@ -325,6 +326,15 @@ class KorailGUI:
         )
         self._btn_stop.pack(side=tk.LEFT, padx=(0, 10))
 
+        self._btn_buy = tk.Button(
+            frame, text="🌐  구매 페이지 열기", font=FONT_BOLD,
+            bg=CLR_SUCCESS, fg="white",
+            activebackground="#14633B", activeforeground="white",
+            relief=tk.FLAT, padx=20, pady=10, cursor="hand2",
+            state=tk.DISABLED, command=self._open_purchase_url,
+        )
+        self._btn_buy.pack(side=tk.LEFT, padx=(0, 10))
+
         tk.Button(
             frame, text="로그 지우기", font=FONT_LABEL,
             bg=CLR_BORDER, fg=CLR_TEXT,
@@ -469,8 +479,8 @@ class KorailGUI:
                     self._on_monitoring_done()
 
                 elif kind == "seat_found":
-                    _, trains_text = item
-                    self._on_seat_found(trains_text)
+                    _, trains_text, ticket_url = item
+                    self._on_seat_found(trains_text, ticket_url)
 
         except queue.Empty:
             pass
@@ -491,8 +501,10 @@ class KorailGUI:
         self._is_monitoring = True
         self._request_count = 0
         self._next_check_ts = 0.0
+        self._current_ticket_url = query.ticket_url()
         self._btn_start.configure(state=tk.DISABLED)
         self._btn_stop.configure(state=tk.NORMAL)
+        self._btn_buy.configure(state=tk.DISABLED)
         self._set_status("모니터링 중...", CLR_ACCENT)
 
         summary = (
@@ -526,18 +538,42 @@ class KorailGUI:
         self._set_status("모니터링 종료", CLR_MUTED)
         self._counter_label.configure(text="")
         self._countdown_label.configure(text="")
+        # 빈자리가 발견된 경우 구매 버튼 유지 (사용자가 클릭할 수 있도록)
 
-    def _on_seat_found(self, trains_text: str) -> None:
+    def _on_seat_found(self, trains_text: str, ticket_url: str = "") -> None:
         self._set_status("빈자리 발견!", CLR_SUCCESS)
         self._root.bell()
+        if ticket_url:
+            self._current_ticket_url = ticket_url
+            self._btn_buy.configure(state=tk.NORMAL)
         if trains_text:
             self._log(f"\n{'━'*52}", "DETECT")
             self._log(f"  빈자리 발견!\n{trains_text}", "DETECT")
+            if ticket_url:
+                self._log(f"  ↳ 구매 페이지: {ticket_url}", "DETECT")
             self._log(f"{'━'*52}\n", "DETECT")
         self._root.after(5000, lambda: (
             self._set_status("모니터링 중...", CLR_ACCENT)
             if self._is_monitoring else None
         ))
+
+    def _open_purchase_url(self) -> None:
+        """코레일 구매 페이지를 Chrome으로 열기 (없으면 기본 브라우저 사용)"""
+        import subprocess
+        import webbrowser
+
+        url = self._current_ticket_url or "https://www.korail.com/ticket/search"
+
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for chrome in chrome_paths:
+            if os.path.isfile(chrome):
+                subprocess.Popen([chrome, url])
+                return
+        webbrowser.open(url)
 
     # ── 쿼리/설정 빌더 ────────────────────────────────────────────
 
@@ -669,7 +705,7 @@ class KorailGUI:
                         f"{t.departure_time:%H:%M}→{t.arrival_time:%H:%M}  "
                         f"({seat_str})"
                     )
-                self._gui_queue.put_nowait(("seat_found", "\n".join(lines)))
+                self._gui_queue.put_nowait(("seat_found", "\n".join(lines), query.ticket_url()))
 
             elif msg.event == AgentEvent.POLL_RESULT:
                 payload = msg.payload
