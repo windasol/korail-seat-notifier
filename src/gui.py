@@ -564,8 +564,14 @@ class KorailGUI:
         from src.utils.browser import open_url
 
         url = self._current_ticket_url or "https://www.korail.com/ticket/search"
-        if not open_url(url):
-            self._log("브라우저 열기 실패 — 직접 접속하세요: " + url, "WARNING")
+        self._log(f"  → 브라우저 열기: {url}", "INFO")
+        try:
+            success = open_url(url)
+        except Exception as e:
+            self._log(f"  브라우저 열기 예외: {e}", "ERROR")
+            return
+        if not success:
+            self._log("  브라우저 열기 실패 — 직접 접속하세요: " + url, "WARNING")
 
     # ── 쿼리/설정 빌더 ────────────────────────────────────────────
 

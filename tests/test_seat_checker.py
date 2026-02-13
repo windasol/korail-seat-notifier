@@ -28,14 +28,17 @@ class TestParseTime:
 
 
 class TestSeatCountFromCode:
-    def test_sold_out(self):
+    def test_sold_out_code(self):
         assert _seat_count_from_code("00", "매진") == 0
 
-    def test_no_seats(self):
+    def test_sold_out_code_empty_name(self):
         assert _seat_count_from_code("00", "") == 0
 
     def test_available_many(self):
         assert _seat_count_from_code("11", "좌석많음") == 99
+
+    def test_available_여유(self):
+        assert _seat_count_from_code("11", "여유있음") == 99
 
     def test_available_possible(self):
         assert _seat_count_from_code("11", "가능") == 99
@@ -44,6 +47,10 @@ class TestSeatCountFromCode:
         assert _seat_count_from_code("11", "5석") == 5
 
     def test_available_no_info(self):
+        # "예약하기" 같이 숫자 없는 텍스트 → 1석으로 가정 (available 코드 신뢰)
+        assert _seat_count_from_code("11", "예약하기") == 1
+
+    def test_available_no_info_empty(self):
         assert _seat_count_from_code("11", "") == 1
 
     def test_code_13_available(self):
@@ -51,6 +58,20 @@ class TestSeatCountFromCode:
 
     def test_empty_code(self):
         assert _seat_count_from_code("", "") == 0
+
+    # ── 핵심 버그 케이스: code="11"인데 name에 매진 텍스트 ─────────
+    def test_code_11_but_name_매진(self):
+        """code=11이어도 name이 '매진'이면 0을 반환해야 함 (이전에는 1 반환하는 버그)"""
+        assert _seat_count_from_code("11", "매진") == 0
+
+    def test_code_11_but_name_대기(self):
+        assert _seat_count_from_code("11", "대기접수") == 0
+
+    def test_code_13_but_name_마감(self):
+        assert _seat_count_from_code("13", "마감") == 0
+
+    def test_code_11_but_name_없음(self):
+        assert _seat_count_from_code("11", "좌석없음") == 0
 
 
 class TestCalcDuration:

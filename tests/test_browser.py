@@ -69,91 +69,157 @@ class TestOpenUrlChrome:
         assert call_count["n"] == 2
 
     def test_chrome_file_not_exist_skipped(self, tmp_path):
-        """Chrome 파일이 없으면 Popen 호출 없이 os.startfile로 넘어가야 함"""
+        """Chrome 파일이 없으면 Popen 호출 없이 ctypes ShellExecuteW로 넘어가야 함"""
         nonexistent = str(tmp_path / "nonexistent_chrome.exe")
 
         with patch("src.utils.browser._get_chrome_paths", return_value=(nonexistent,)):
             with patch("src.utils.browser.subprocess.Popen") as mock_popen:
-                with patch("src.utils.browser.os.startfile") as mock_sf:
-                    open_url("https://example.com")
+                with patch("src.utils.browser.ctypes") as mock_ctypes:
+                    mock_ctypes.windll.shell32.ShellExecuteW.return_value = 42
+                    result = open_url("https://example.com")
 
         mock_popen.assert_not_called()
-        mock_sf.assert_called_once_with("https://example.com")
+        assert result is True
+        mock_ctypes.windll.shell32.ShellExecuteW.assert_called_once()
 
 
 # ─────────────────────────────────────────────────────────────────
-# open_url — os.startfile fallback (cmd /c start 대체)
+# open_url — ctypes ShellExecuteW (2순위, exe 환경 포함)
 # ─────────────────────────────────────────────────────────────────
 
-class TestOpenUrlStartfile:
-    def test_no_chrome_uses_startfile(self):
-        """Chrome 없으면 os.startfile 로 URL 열기"""
+class TestOpenUrlCtypes:
+    def test_no_chrome_uses_ctypes_shell_execute(self):
+        """Chrome 없으면 ctypes ShellExecuteW 호출"""
+        mock_shell32 = MagicMock()
+        mock_shell32.ShellExecuteW.return_value = 42  # >32 = success
+
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile") as mock_sf:
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 42
                 result = open_url("https://example.com")
+
+        assert result is True
+        mock_ctypes.windll.shell32.ShellExecuteW.assert_called_once_with(
+            None, "open", "https://example.com", None, None, 1
+        )
+
+    def test_shell_execute_fail_value_falls_to_startfile(self):
+        """ShellExecuteW 반환값 ≤32이면 os.startfile로 fallback"""
+        with patch("src.utils.browser._get_chrome_paths", return_value=()):
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2  # ≤32 = fail
+                with patch("src.utils.browser.os.startfile") as mock_sf:
+                    result = open_url("https://example.com")
 
         assert result is True
         mock_sf.assert_called_once_with("https://example.com")
 
-    def test_url_with_ampersand_safe(self):
-        """& 포함 URL도 os.startfile 에 그대로 전달 (cmd 파싱 문제 없음)"""
-        url = "https://www.korail.com/ticket/search?startStnCd=0001&endStnCd=0032&psgNum=1"
+    def test_ctypes_exception_falls_to_startfile(self):
+        """ctypes 예외 시 os.startfile로 fallback"""
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile") as mock_sf:
+            with patch("src.utils.browser.ctypes", side_effect=Exception("no ctypes")):
+                with patch("src.utils.browser.os.startfile") as mock_sf:
+                    result = open_url("https://example.com")
+
+        assert result is True
+        mock_sf.assert_called_once_with("https://example.com")
+
+    def test_url_with_ampersand_passed_intact(self):
+        """& 포함 URL이 ShellExecuteW에 그대로 전달됨"""
+        url = "https://korail.com?a=1&b=2&c=3"
+        with patch("src.utils.browser._get_chrome_paths", return_value=()):
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 42
                 open_url(url)
 
-        mock_sf.assert_called_once_with(url)
+        call_args = mock_ctypes.windll.shell32.ShellExecuteW.call_args[0]
+        assert call_args[2] == url  # 3번째 인자가 URL (변형 없음)
+
+
+# ─────────────────────────────────────────────────────────────────
+# open_url — os.startfile fallback (3순위)
+# ─────────────────────────────────────────────────────────────────
+
+class TestOpenUrlStartfile:
+    def test_ctypes_fail_uses_startfile(self):
+        """ctypes 실패하면 os.startfile 로 URL 열기"""
+        with patch("src.utils.browser._get_chrome_paths", return_value=()):
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2  # fail
+                with patch("src.utils.browser.os.startfile") as mock_sf:
+                    result = open_url("https://example.com")
+
+        assert result is True
+        mock_sf.assert_called_once_with("https://example.com")
 
     def test_startfile_oserror_falls_to_webbrowser(self):
-        """os.startfile 실패 시 webbrowser fallback"""
+        """ctypes + os.startfile 모두 실패 시 webbrowser fallback"""
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile", side_effect=OSError):
-                with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
-                    result = open_url("https://example.com")
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2  # fail
+                with patch("src.utils.browser.os.startfile", side_effect=OSError):
+                    with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
+                        result = open_url("https://example.com")
 
         assert result is True
         mock_wb.assert_called_once_with("https://example.com")
 
     def test_startfile_attribute_error_falls_to_webbrowser(self):
-        """비-Windows에서 os.startfile 없을 때 webbrowser fallback"""
+        """비-Windows os.startfile 없을 때 webbrowser fallback"""
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile", side_effect=AttributeError):
-                with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
-                    result = open_url("https://example.com")
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2
+                with patch("src.utils.browser.os.startfile", side_effect=AttributeError):
+                    with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
+                        result = open_url("https://example.com")
 
         assert result is True
         mock_wb.assert_called_once_with("https://example.com")
 
 
 # ─────────────────────────────────────────────────────────────────
-# open_url — webbrowser fallback
+# open_url — webbrowser fallback (4순위)
 # ─────────────────────────────────────────────────────────────────
 
 class TestOpenUrlWebbrowser:
+    def _no_chrome_ctypes_fail_startfile_fail(self):
+        """Chrome 없음 + ctypes 실패 + startfile 실패 컨텍스트"""
+        return (
+            patch("src.utils.browser._get_chrome_paths", return_value=()),
+            patch("src.utils.browser.ctypes") ,
+            patch("src.utils.browser.os.startfile", side_effect=OSError),
+        )
+
     def test_webbrowser_called_when_all_else_fails(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile", side_effect=OSError):
-                with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
-                    result = open_url("https://korail.com")
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2
+                with patch("src.utils.browser.os.startfile", side_effect=OSError):
+                    with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
+                        result = open_url("https://korail.com")
 
         assert result is True
         mock_wb.assert_called_once_with("https://korail.com")
 
     def test_all_methods_fail_returns_false(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile", side_effect=OSError):
-                with patch(
-                    "src.utils.browser.webbrowser.open_new_tab",
-                    side_effect=Exception("no browser"),
-                ):
-                    result = open_url("https://example.com")
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2
+                with patch("src.utils.browser.os.startfile", side_effect=OSError):
+                    with patch(
+                        "src.utils.browser.webbrowser.open_new_tab",
+                        side_effect=Exception("no browser"),
+                    ):
+                        result = open_url("https://example.com")
 
         assert result is False
 
     def test_returns_true_on_success(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.os.startfile", side_effect=OSError):
-                with patch("src.utils.browser.webbrowser.open_new_tab", return_value=None):
-                    result = open_url("https://example.com")
+            with patch("src.utils.browser.ctypes") as mock_ctypes:
+                mock_ctypes.windll.shell32.ShellExecuteW.return_value = 2
+                with patch("src.utils.browser.os.startfile", side_effect=OSError):
+                    with patch("src.utils.browser.webbrowser.open_new_tab", return_value=None):
+                        result = open_url("https://example.com")
 
         assert result is True

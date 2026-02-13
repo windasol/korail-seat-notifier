@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import subprocess
@@ -35,35 +36,51 @@ def _get_chrome_paths() -> tuple[str, ...]:
 def open_url(url: str) -> bool:
     """URL을 Chrome 우선, 기본 브라우저 fallback으로 열기.
 
-    주의: cmd /c start 는 URL의 '&' 를 명령 구분자로 해석하므로 사용하지 않음.
-    os.startfile → ShellExecuteEx 직접 호출로 & 문제 없음.
+    우선순위:
+      1. Chrome 실행파일 직접 실행
+      2. ctypes ShellExecuteW — Win32 API 직접 호출 (exe 환경 포함, & 문제 없음)
+      3. os.startfile — Python wrapper for ShellExecute
+      4. webbrowser.open_new_tab — stdlib 최후 fallback
 
     Returns:
         True  — 성공적으로 실행 요청
         False — 모든 방법 실패
     """
+    logger.info("URL 열기 시도: %s", url)
+
     # ── 1. Chrome 직접 실행 ───────────────────────────────────────
     for path in _get_chrome_paths():
         if os.path.isfile(path):
             try:
                 subprocess.Popen([path, url])
-                logger.info("Chrome으로 URL 열기: %s", url)
+                logger.info("성공 [Chrome]: %s", path)
                 return True
-            except OSError:
+            except OSError as e:
+                logger.debug("Chrome Popen 실패 (%s): %s", path, e)
                 continue
 
-    # ── 2. os.startfile — ShellExecute 직접 호출 (& 문제 없음) ────
+    # ── 2. ctypes ShellExecuteW (exe 포함 가장 신뢰성 높음) ────────
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(None, "open", url, None, None, 1)  # type: ignore[attr-defined]
+        if result > 32:
+            logger.info("성공 [ctypes ShellExecuteW]: result=%d", result)
+            return True
+        logger.warning("ShellExecuteW 반환값 이상: %d", result)
+    except Exception as e:
+        logger.debug("ctypes ShellExecuteW 실패: %s", e)
+
+    # ── 3. os.startfile ───────────────────────────────────────────
     try:
         os.startfile(url)  # type: ignore[attr-defined]
-        logger.info("os.startfile로 URL 열기: %s", url)
+        logger.info("성공 [os.startfile]")
         return True
-    except (AttributeError, OSError):
-        pass
+    except (AttributeError, OSError) as e:
+        logger.debug("os.startfile 실패: %s", e)
 
-    # ── 3. webbrowser stdlib fallback ─────────────────────────────
+    # ── 4. webbrowser stdlib fallback ─────────────────────────────
     try:
         webbrowser.open_new_tab(url)
-        logger.info("webbrowser로 URL 열기: %s", url)
+        logger.info("성공 [webbrowser]")
         return True
     except Exception as exc:
         logger.error("URL 열기 실패 (모든 방법 소진): %s", exc)

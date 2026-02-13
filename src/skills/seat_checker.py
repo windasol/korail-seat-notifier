@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from datetime import time
 from time import monotonic
 from typing import ClassVar, Optional
@@ -60,6 +61,9 @@ class SeatCheckerSkill:
             "Dalvik/2.1.0 (Linux; U; Android 5.1.1; Nexus 4 Build/LMY48T)"
         ),
         "Accept": "application/json",
+        # 서버 캐시 방지
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
     }
 
     def __init__(
@@ -185,6 +189,8 @@ class SeatCheckerSkill:
             "txtMenuId":      "11",
             "txtGdNo":        "",
             "txtJobDv":       "",
+            # 서버 캐시 버스팅 (요청마다 고유값)
+            "_cb":            str(random.randint(100000, 999999)),
         }
 
     @staticmethod
@@ -217,6 +223,13 @@ class SeatCheckerSkill:
             general_seats = _seat_count_from_code(gen_cd, gen_nm)
             special_seats = _seat_count_from_code(spe_cd, spe_nm)
 
+            logger.debug(
+                "열차 %s %s | 일반[cd=%s nm=%r → %d석] 특실[cd=%s nm=%r → %d석]",
+                item.get("h_trn_clsf_nm", ""), item.get("h_trn_no", ""),
+                gen_cd, gen_nm, general_seats,
+                spe_cd, spe_nm, special_seats,
+            )
+
             trains.append(TrainInfo(
                 train_no=item.get("h_trn_no", ""),
                 train_type=item.get("h_trn_clsf_nm", ""),
@@ -230,15 +243,31 @@ class SeatCheckerSkill:
 
 
 def _seat_count_from_code(code: str, name: str) -> int:
-    """예약코드 + 텍스트로 잔여석 수 추정"""
-    if code in _RSV_CODE_AVAILABLE:
-        # 텍스트에서 구체적인 수 추출 시도
-        if "많음" in name or "충분" in name or "가능" in name:
-            return 99
-        digits = "".join(c for c in name if c.isdigit())
-        return int(digits) if digits else 1
-    # 매진/대기/없음
-    return 0
+    """예약코드 + 텍스트로 잔여석 수 추정
+
+    주의: code="11"이라도 name에 매진/대기 텍스트가 있으면 0 반환.
+    이전 코드는 name="매진" 일 때 digits=""이라 else 1을 반환하는 버그 있었음.
+    """
+    # 코드 자체가 매진/불가
+    if code not in _RSV_CODE_AVAILABLE:
+        return 0
+
+    # 코드는 available이지만 텍스트에 매진/대기 명시 → 0으로 처리
+    _UNAVAILABLE_TEXTS = ("매진", "대기", "마감", "없음", "불가", "SOLD")
+    if any(t in name for t in _UNAVAILABLE_TEXTS):
+        return 0
+
+    # 충분히 많은 경우
+    if any(t in name for t in ("많음", "충분", "여유", "가능")):
+        return 99
+
+    # 텍스트에서 숫자 추출 (예: "3석" → 3)
+    digits = "".join(c for c in name if c.isdigit())
+    if digits:
+        return int(digits)
+
+    # 텍스트에 정보 없음 — "예약하기" 등은 1석으로 가정 (available 코드를 신뢰)
+    return 1
 
 
 def _parse_time(s: str) -> time:
