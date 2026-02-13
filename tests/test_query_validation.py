@@ -76,6 +76,32 @@ class TestTrainQuery:
         assert "부산" in s
         assert "08:00" in s
 
+    def test_ticket_url_contains_station_codes(self):
+        q = TrainQuery(
+            departure_station="서울",
+            arrival_station="부산",
+            departure_date=date(2026, 3, 1),
+            preferred_time_start=time(8, 0),
+            preferred_time_end=time(12, 0),
+        )
+        url = q.ticket_url()
+        assert url.startswith("https://www.korail.com/ticket/search")
+        assert "0001" in url    # 서울 역 코드
+        assert "0032" in url    # 부산 역 코드
+        assert "20260301" in url
+        assert "080000" in url
+
+    def test_ticket_url_passenger_count(self):
+        q = TrainQuery(
+            departure_station="서울",
+            arrival_station="부산",
+            departure_date=date(2026, 3, 1),
+            preferred_time_start=time(8, 0),
+            preferred_time_end=time(12, 0),
+            passenger_count=3,
+        )
+        assert "psgNum=3" in q.ticket_url()
+
 
 class TestTrainInfo:
     def test_has_seats(self):

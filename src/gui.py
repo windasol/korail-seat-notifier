@@ -560,26 +560,12 @@ class KorailGUI:
         ))
 
     def _open_purchase_url(self) -> None:
-        """코레일 구매 페이지를 Chrome으로 열기 (없으면 기본 브라우저 사용)"""
-        import subprocess
-        import webbrowser
+        """코레일 구매 페이지를 Chrome 우선, 기본 브라우저 fallback으로 열기"""
+        from src.utils.browser import open_url
 
         url = self._current_ticket_url or "https://www.korail.com/ticket/search"
-
-        chrome_paths = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        ]
-        for chrome in chrome_paths:
-            if os.path.isfile(chrome):
-                try:
-                    subprocess.Popen([chrome, url])
-                    return
-                except OSError:
-                    continue
-        # Chrome을 못 찾으면 기본 브라우저로 열기
-        webbrowser.open(url, new=2)
+        if not open_url(url):
+            self._log("브라우저 열기 실패 — 직접 접속하세요: " + url, "WARNING")
 
     # ── 쿼리/설정 빌더 ────────────────────────────────────────────
 
@@ -711,7 +697,11 @@ class KorailGUI:
                         f"{t.departure_time:%H:%M}→{t.arrival_time:%H:%M}  "
                         f"({seat_str})"
                     )
-                self._gui_queue.put_nowait(("seat_found", "\n".join(lines), query.ticket_url()))
+                try:
+                    ticket_url = query.ticket_url()
+                except Exception:
+                    ticket_url = "https://www.korail.com/ticket/search"
+                self._gui_queue.put_nowait(("seat_found", "\n".join(lines), ticket_url))
 
             elif msg.event == AgentEvent.POLL_RESULT:
                 payload = msg.payload
