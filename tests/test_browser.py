@@ -69,48 +69,55 @@ class TestOpenUrlChrome:
         assert call_count["n"] == 2
 
     def test_chrome_file_not_exist_skipped(self, tmp_path):
+        """Chrome 파일이 없으면 Popen 호출 없이 os.startfile로 넘어가야 함"""
         nonexistent = str(tmp_path / "nonexistent_chrome.exe")
 
         with patch("src.utils.browser._get_chrome_paths", return_value=(nonexistent,)):
             with patch("src.utils.browser.subprocess.Popen") as mock_popen:
-                with patch("src.utils.browser.webbrowser.open_new_tab"):
+                with patch("src.utils.browser.os.startfile") as mock_sf:
                     open_url("https://example.com")
 
-        # Popen 이 Chrome 경로로 호출된 게 아니라 cmd 로 호출돼야 함
-        if mock_popen.called:
-            first_args = mock_popen.call_args_list[0][0][0]
-            assert nonexistent not in first_args
+        mock_popen.assert_not_called()
+        mock_sf.assert_called_once_with("https://example.com")
 
 
 # ─────────────────────────────────────────────────────────────────
-# open_url — cmd /c start fallback
+# open_url — os.startfile fallback (cmd /c start 대체)
 # ─────────────────────────────────────────────────────────────────
 
-class TestOpenUrlCmdStart:
-    def test_no_chrome_uses_cmd_start(self):
+class TestOpenUrlStartfile:
+    def test_no_chrome_uses_startfile(self):
+        """Chrome 없으면 os.startfile 로 URL 열기"""
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen") as mock_popen:
+            with patch("src.utils.browser.os.startfile") as mock_sf:
                 result = open_url("https://example.com")
 
         assert result is True
-        args = mock_popen.call_args[0][0]
-        assert "cmd" in args
-        assert "/c" in args
-        assert "start" in args
-        assert "https://example.com" in args
+        mock_sf.assert_called_once_with("https://example.com")
 
-    def test_url_with_ampersand_passed_correctly(self):
-        url = "https://www.korail.com/ticket/search?a=1&b=2"
+    def test_url_with_ampersand_safe(self):
+        """& 포함 URL도 os.startfile 에 그대로 전달 (cmd 파싱 문제 없음)"""
+        url = "https://www.korail.com/ticket/search?startStnCd=0001&endStnCd=0032&psgNum=1"
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen") as mock_popen:
+            with patch("src.utils.browser.os.startfile") as mock_sf:
                 open_url(url)
 
-        args = mock_popen.call_args[0][0]
-        assert url in args
+        mock_sf.assert_called_once_with(url)
 
-    def test_cmd_oserror_falls_to_webbrowser(self):
+    def test_startfile_oserror_falls_to_webbrowser(self):
+        """os.startfile 실패 시 webbrowser fallback"""
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen", side_effect=OSError):
+            with patch("src.utils.browser.os.startfile", side_effect=OSError):
+                with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
+                    result = open_url("https://example.com")
+
+        assert result is True
+        mock_wb.assert_called_once_with("https://example.com")
+
+    def test_startfile_attribute_error_falls_to_webbrowser(self):
+        """비-Windows에서 os.startfile 없을 때 webbrowser fallback"""
+        with patch("src.utils.browser._get_chrome_paths", return_value=()):
+            with patch("src.utils.browser.os.startfile", side_effect=AttributeError):
                 with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
                     result = open_url("https://example.com")
 
@@ -125,7 +132,7 @@ class TestOpenUrlCmdStart:
 class TestOpenUrlWebbrowser:
     def test_webbrowser_called_when_all_else_fails(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen", side_effect=OSError):
+            with patch("src.utils.browser.os.startfile", side_effect=OSError):
                 with patch("src.utils.browser.webbrowser.open_new_tab") as mock_wb:
                     result = open_url("https://korail.com")
 
@@ -134,7 +141,7 @@ class TestOpenUrlWebbrowser:
 
     def test_all_methods_fail_returns_false(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen", side_effect=OSError):
+            with patch("src.utils.browser.os.startfile", side_effect=OSError):
                 with patch(
                     "src.utils.browser.webbrowser.open_new_tab",
                     side_effect=Exception("no browser"),
@@ -145,7 +152,7 @@ class TestOpenUrlWebbrowser:
 
     def test_returns_true_on_success(self):
         with patch("src.utils.browser._get_chrome_paths", return_value=()):
-            with patch("src.utils.browser.subprocess.Popen", side_effect=OSError):
+            with patch("src.utils.browser.os.startfile", side_effect=OSError):
                 with patch("src.utils.browser.webbrowser.open_new_tab", return_value=None):
                     result = open_url("https://example.com")
 

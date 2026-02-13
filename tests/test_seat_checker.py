@@ -112,6 +112,33 @@ class TestBuildParams:
         assert params["Version"] == "190617001"
         assert params["radJobId"] == "1"
 
+    def test_train_type_all_uses_code_00(self):
+        """전체 선택 시 코드 '00' 사용 (109는 ITX-청춘 코드)"""
+        q = TrainQuery(
+            departure_station="서울",
+            arrival_station="부산",
+            departure_date=date(2026, 3, 1),
+            preferred_time_start=time(8, 0),
+            preferred_time_end=time(12, 0),
+            train_type="전체",
+        )
+        params = SeatCheckerSkill._build_params(q)
+        assert params["selGoTrain"] == "00"
+        assert params["txtTrnGpCd"] == "00"
+
+    def test_train_type_itx_cheongchun(self):
+        """ITX-청춘 코드는 109"""
+        q = TrainQuery(
+            departure_station="서울",
+            arrival_station="부산",
+            departure_date=date(2026, 3, 1),
+            preferred_time_start=time(8, 0),
+            preferred_time_end=time(12, 0),
+            train_type="ITX-청춘",
+        )
+        params = SeatCheckerSkill._build_params(q)
+        assert params["selGoTrain"] == "109"
+
 
 class TestParseResponse:
     def test_empty_response(self):

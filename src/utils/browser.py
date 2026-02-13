@@ -35,6 +35,9 @@ def _get_chrome_paths() -> tuple[str, ...]:
 def open_url(url: str) -> bool:
     """URL을 Chrome 우선, 기본 브라우저 fallback으로 열기.
 
+    주의: cmd /c start 는 URL의 '&' 를 명령 구분자로 해석하므로 사용하지 않음.
+    os.startfile → ShellExecuteEx 직접 호출로 & 문제 없음.
+
     Returns:
         True  — 성공적으로 실행 요청
         False — 모든 방법 실패
@@ -49,16 +52,12 @@ def open_url(url: str) -> bool:
             except OSError:
                 continue
 
-    # ── 2. Windows cmd /c start (기본 브라우저, exe 포함) ──────────
+    # ── 2. os.startfile — ShellExecute 직접 호출 (& 문제 없음) ────
     try:
-        subprocess.Popen(
-            ["cmd", "/c", "start", "", url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info("cmd start로 URL 열기: %s", url)
+        os.startfile(url)  # type: ignore[attr-defined]
+        logger.info("os.startfile로 URL 열기: %s", url)
         return True
-    except OSError:
+    except (AttributeError, OSError):
         pass
 
     # ── 3. webbrowser stdlib fallback ─────────────────────────────
