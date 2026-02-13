@@ -552,6 +552,8 @@ class KorailGUI:
             if ticket_url:
                 self._log(f"  ↳ 구매 페이지: {ticket_url}", "DETECT")
             self._log(f"{'━'*52}\n", "DETECT")
+        # 빈자리 발견 즉시 구매 페이지 자동 열기
+        self._open_purchase_url()
         self._root.after(5000, lambda: (
             self._set_status("모니터링 중...", CLR_ACCENT)
             if self._is_monitoring else None
@@ -571,9 +573,13 @@ class KorailGUI:
         ]
         for chrome in chrome_paths:
             if os.path.isfile(chrome):
-                subprocess.Popen([chrome, url])
-                return
-        webbrowser.open(url)
+                try:
+                    subprocess.Popen([chrome, url])
+                    return
+                except OSError:
+                    continue
+        # Chrome을 못 찾으면 기본 브라우저로 열기
+        webbrowser.open(url, new=2)
 
     # ── 쿼리/설정 빌더 ────────────────────────────────────────────
 
